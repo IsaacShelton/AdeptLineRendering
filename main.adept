@@ -1,0 +1,265 @@
+
+import '2.2/List.adept'
+import '2.2/Ownership.adept'
+import '2.2/captain.adept'
+import 'polyline2d.adept'
+
+#default show_vertex_count             false
+#default enable_experimental_texturing true
+
+model CaptModel
+points <Vec2> List
+thickness float
+joint_style JointStyle
+end_cap_style EndCapStyle
+wireframe bool
+
+bezier_points <Vec2> List
+bezier_model CaptModel
+has_bezier_model bool
+only_bezier bool
+use_texture bool
+point_texture_backwards bool
+
+#if enable_experimental_texturing
+texture CaptTexture
+#end
+
+BEZIER_LINE_STEP_COUNT == 50
+
+func main {
+    captOnSetup(func &onSetup)
+    captOnExit(func &onExit)
+    captOnClick(func &onClick, true)
+    captOnKey(func &onKey)
+    captOnStep(func &onStep)
+    captOnDraw(func &onDraw)
+    captStart('Line Rendering', 640, 480, false)
+}
+
+func onSetup {
+    captCustomView(640.0f, 480.0f)
+    
+    points.add(vec2(128.0f, 240.0f))
+    points.add(vec2(480.0f, 240.0f))
+    thickness = 10.0f
+    joint_style = JointStyle::ROUND
+    end_cap_style = EndCapStyle::ROUND
+    wireframe = false
+    
+    has_bezier_model = false
+    only_bezier = true
+    
+    #if enable_experimental_texturing
+    texture = captTexture('texture.png')
+    #end
+    
+    makeLine(false)
+}
+
+func onExit {
+    model.free()
+    
+    #if enable_experimental_texturing
+    texture.destroy()
+    #end
+    
+    if has_bezier_model, bezier_model.free()
+}
+
+func onClick(x, y float, button int) {
+    if button == 2 {
+        points.reduce()
+        makeLine(true)
+    } else if button == 1{
+        points.add(vec2(x, y))
+        makeLine(true)
+    } else if button == 3 {
+        switch joint_style {
+        case JointStyle::MITER, joint_style = JointStyle::BEVEL
+        case JointStyle::BEVEL, joint_style = JointStyle::ROUND
+        case JointStyle::ROUND, joint_style = JointStyle::MITER
+        }
+        makeLine(true)
+    } else if button == 4 {
+        thickness += 1.0f
+        makeLine(true)
+    } else if button == 5 {
+        thickness -= 1.0f
+        makeLine(true)
+    }
+}
+
+func onKey(key, scancode, action, mods int) {
+    unless action == GLFW_PRESS, return
+    
+    if key == GLFW_KEY_SPACE {
+        wireframe = !wireframe
+        glPolygonMode(GL_FRONT_AND_BACK, wireframe ? GL_LINE : GL_FILL)
+    }
+    
+    if key == GLFW_KEY_LEFT_SHIFT {
+        only_bezier = !only_bezier
+    }
+    
+    if key == GLFW_KEY_LEFT_CONTROL {
+        use_texture = !use_texture
+    }
+}
+
+func onStep {
+    repeat 4 {
+        if captKeyHeld(GLFW_KEY_1 + idx) && points.length > idx {
+            captMouseViewPosition(undef mouse_x float, undef mouse_y float)
+            points.getPointer(idx).x = mouse_x
+            points.getPointer(idx).y = mouse_y
+            makeLine(true)
+        }
+    }
+}
+
+func onDraw {
+    captClearColor(captColor(255, 0, 0))
+    
+    transformation Matrix4f = undef
+    transformation.identity()
+    _captain_shader.uploadMatrix4f(_captain_shader_transformation_location, transformation)
+    
+    if use_texture {
+        captBindTexture(texture)
+    } else {
+        glActiveTexture(GL_TEXTURE0)
+        glBindTexture(GL_TEXTURE_2D, 0)
+    }
+    
+    if has_bezier_model {
+        bezier_model.draw()
+        unless only_bezier, model.draw()
+    } else {
+        model.draw()
+    }
+}
+
+func makeLine(free_old_model bool) {
+    unless points.length > 0, return
+    if free_old_model, model.free()
+    
+    model = lineToModel(points)
+    
+    if points.length >= 3 && points.length <= 4, makeBezier()
+    else if has_bezier_model, bezier_model.free(); has_bezier_model = false
+}
+
+func lineToModel(line_points <Vec2> List) CaptModel {
+    vertices <Vec2> List = Polyline2D_create(line_points, thickness, joint_style, end_cap_style, false)
+    
+    vs *float = new float * (vertices.length * 3)
+    defer delete vs
+    
+    uvs *float = new float * (vertices.length * 2)
+    defer delete uvs
+    
+    each Vec2 in vertices {
+        vs[idx * 3 + 0] = it.x
+        vs[idx * 3 + 1] = it.y
+        vs[idx * 3 + 2] = 0.0f
+    }
+    
+    memset(uvs, 0, sizeof float * vertices.length * 2)
+    
+    #if enable_experimental_texturing
+    // 2 3
+    // 1 6
+    
+    // 1, 2, 3, 1, 3, 4
+    uv_src 8 float = undef
+    uv_src[0]  = 0.0f; uv_src[1]  = 1.0f
+    uv_src[2]  = 0.0f; uv_src[3]  = 0.0f
+    uv_src[4]  = 1.0f; uv_src[5]  = 0.0f
+    uv_src[6]  = 1.0f;  uv_src[7] = 1.0f
+    
+    unless point_texture_backwards {
+        // Swap 2 with 1 and 3 with 6
+        tmp 2 float = undef
+        
+        tmp[0] = uv_src[2]
+        tmp[1] = uv_src[3]
+        uv_src[2] = uv_src[0]
+        uv_src[3] = uv_src[1]
+        uv_src[0] = tmp[0]
+        uv_src[1] = tmp[1]
+        
+        tmp[0] = uv_src[4]
+        tmp[1] = uv_src[5]
+        uv_src[4] = uv_src[6]
+        uv_src[5] = uv_src[7]
+        uv_src[6] = tmp[0]
+        uv_src[7] = tmp[1]
+    }
+    
+    repeat vertices.length / 6 {
+        uvs[idx * 12 + 4] = uv_src[0 * 2]
+        uvs[idx * 12 + 5] = uv_src[0 * 2 + 1]
+        uvs[idx * 12 + 0] = uv_src[1 * 2]
+        uvs[idx * 12 + 1] = uv_src[1 * 2 + 1]
+        uvs[idx * 12 + 2] = uv_src[2 * 2]
+        uvs[idx * 12 + 3] = uv_src[2 * 2 + 1]
+        
+        uvs[idx * 12 + 6]  = uv_src[0 * 2]
+        uvs[idx * 12 + 7]  = uv_src[0 * 2 + 1]
+        uvs[idx * 12 + 8]  = uv_src[2 * 2]
+        uvs[idx * 12 + 9]  = uv_src[2 * 2 + 1]
+        uvs[idx * 12 + 10] = uv_src[3 * 2]
+        uvs[idx * 12 + 11] = uv_src[3 * 2 + 1]
+    }
+    #end
+    
+    #if show_vertex_count
+    new_title String = "%" % vertices.length
+    new_title_cstr *ubyte = new_title.cstr()
+    defer delete new_title_cstr
+    glfwSetWindowTitle(_captain_window, new_title_cstr)
+    #end
+    
+    result CaptModel
+    result.create(vs, vertices.length * 3, uvs, vertices.length * 2)
+    return result
+}
+
+func makeBezier {
+    if points.length < 3 || points.length > 4, return
+    
+    if has_bezier_model, bezier_model.free()
+    bezier_points.clear()
+    
+    p0 Vec2 = points.get(0uz)
+    p1 Vec2 = points.get(1uz)
+    p2 Vec2 = points.get(2uz)
+    count usize = BEZIER_LINE_STEP_COUNT
+    
+    if points.length == 3 {
+        repeat count {
+            t float = cast float idx / cast float count
+            q0 Vec2 = add(multiply(p0, 1.0f - t), multiply(p1, t))
+            q1 Vec2 = add(multiply(p1, 1.0f - t), multiply(p2, t))
+            r  Vec2 = add(multiply(q0, 1.0f - t), multiply(q1, t))
+            bezier_points.add(r)
+        }
+    } else if points.length == 4 {
+        p3 Vec2 = points.get(3uz)
+        
+        repeat count {
+            t float = cast float idx / cast float count
+            q0 Vec2 = add(multiply(p0, 1.0f - t), multiply(p1, t))
+            q1 Vec2 = add(multiply(p1, 1.0f - t), multiply(p2, t))
+            q2 Vec2 = add(multiply(p2, 1.0f - t), multiply(p3, t))
+            r0 Vec2 = add(multiply(q0, 1.0f - t), multiply(q1, t))
+            r1 Vec2 = add(multiply(q1, 1.0f - t), multiply(q2, t))
+            s  Vec2 = add(multiply(r0, 1.0f - t), multiply(r1, t))
+            bezier_points.add(s)
+        }
+    }
+    
+    bezier_model = lineToModel(bezier_points)
+    has_bezier_model = true
+}
